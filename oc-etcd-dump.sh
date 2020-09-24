@@ -28,23 +28,25 @@ fi
 #readarray -t projects <<<"$(oc get project -o \
     #jsonpath=$'{range .items[*]}{.metadata.name}\n{end}')"
 
-readarray -t resources <<<"$(oc api-resources -o wide | awk '{
+readarray -t resources <<<"$(oc api-resources -o wide | gawk '{
     if (NR == 1) {
         if ((groupIndex = index($0, "APIGROUP")) < 1) {
-            print "Failed to find APIGROUP column!" >/dev/stderr
+            print "Failed to find APIGROUP column!" | "cat 1>&2"
             exit 1
         }
         next
     }
+    if (substr($0, groupIndex, 1) == " ") {
+        fullname = $1
+    } else {
+        name = $1
+        $0 = substr($0, groupIndex)
+        fullname = name "." $1
+    }
     if ($0 ~ /\[.*\<list\>.*\]/) {
-        if (substr($0, groupIndex, 1) == " ") {
-            print $1
-        } else {
-            name = $1
-            $0 = substr($0, groupIndex)
-            OFS = "."
-            print  name, $1
-        }
+        print fullname
+    } else {
+        printf "Ignoring resource %s not supporting list!\n", fullname | "cat 1>&2"
     }
 }')"
 
