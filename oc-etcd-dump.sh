@@ -25,9 +25,6 @@ elif [[ "$#" -gt 0 ]]; then
     exit 1
 fi
 
-#readarray -t projects <<<"$(oc get project -o \
-    #jsonpath=$'{range .items[*]}{.metadata.name}\n{end}')"
-
 readarray -t resources <<<"$(oc api-resources -o wide | gawk '{
     if (NR == 1) {
         if ((groupIndex = index($0, "APIGROUP")) < 1) {
