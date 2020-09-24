@@ -28,7 +28,7 @@ fi
 readarray -t resources <<<"$(oc api-resources -o wide | gawk '{
     if (NR == 1) {
         if ((groupIndex = index($0, "APIGROUP")) < 1) {
-            print "Failed to find APIGROUP column!" | "cat 1>&2"
+            print "Failed to find APIGROUP column!" > "/dev/stderr"
             exit 1
         }
         next
@@ -43,7 +43,7 @@ readarray -t resources <<<"$(oc api-resources -o wide | gawk '{
     if ($0 ~ /\[.*\<list\>.*\]/) {
         print fullname
     } else {
-        printf "Ignoring resource %s not supporting list!\n", fullname | "cat 1>&2"
+        printf "Ignoring resource %s not supporting list!\n", fullname > "/dev/stderr"
     }
 }')"
 
