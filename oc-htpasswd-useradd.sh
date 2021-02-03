@@ -85,7 +85,6 @@ if [[ "${#secrets[@]}" -lt 1 || ( "${#secrets[@]}" == 1 && -z "${secrets[0]:-}" 
     fn="$TMPDIR/ocp-htpasswd"
     files+=( "$fn" )
     no_htpasswd_provider=1
-    #touch "$fn"
 else
     for secret in "${secrets[@]}"; do
         if [[ -z "${secret:-}" ]]; then
@@ -99,7 +98,7 @@ else
 fi
 
 function addUser() {
-    local user="${1%%:*}"
+    local user="${1}"
     local pw fn
     if [[ "${user}" =~ ^([^:]+):(.*) ]]; then
         user="${BASH_REMATCH[1]}"
@@ -113,20 +112,13 @@ function addUser() {
     if [[ "${DRY_RUN:-0}" == 1 ]]; then
         ocargs+=( --dry-run )
     fi
-    readarray -t matches <<<"$(grep -L "^$user:" "${files[@]}" ||:)"
-    if [[ "${#matches[@]}" -lt 1 || ( "${#matches[@]}" == 1 && -z "${matches[0]:-}" ) ]]; then
+
+    if [[ "${no_htpasswd_provider:-0}" == 1 ]]; then
         fn="${files[0]}"
-        htpasswd -c -i "$fn" "$user" <<<"$pw"$'\n'
+        htpasswd -c -b "$fn" "$user" "$pw"
         printf 'Creating new htpaswd secret %s\n' "$(basename "$fn")"
         oc create secret generic "$(basename "$fn")" "${ocargs[@]}" --from-file=htpasswd="$fn"
-    else
-        for fn in "${matches[@]}"; do
-            printf 'Adding user to secret %s\n' "$(basename "$fn")"
-            htpasswd -i "$fn" "$user" <<<"$pw"$'\n'
-            oc set data "secret/$(basename "$fn")" "${ocargs[@]}" --from-file=htpasswd="$fn"
-        done
-    fi
-    if [[ "${no_htpasswd_provider:-0}" == 1 ]]; then
+
         printf 'Creating new htpasswd identity provider.\n'
         if [[ "${DRY_RUN:-0}" == 0 ]]; then
             oc get oauths.config.openshift.io/cluster -o json | \
@@ -138,12 +130,39 @@ function addUser() {
                     }])' | oc replace "${ocargs[@]}" -f -
         fi
         no_htpasswd_provider=0
+        return 0
     fi
+
+    local update=( )
+    readarray -t matches <<<"$(grep -l "^$user:" "${files[@]}" ||:)"
+    if [[ "${#matches[@]}" -lt 1 || ( "${#matches[@]}" == 1 && -z "${matches[0]:-}" ) ]]; then
+        update=( "${files[0]}" )
+    else
+        update=( "${matches[@]}" )
+    fi
+    for fn in "${update[@]}"; do
+        printf 'Adding user "%s" to secret %s\n' "$user" "$(basename "$fn")"
+        htpasswd -b "$fn" "$user" "$pw"
+    done
+    oc set data "secret/$(basename "$fn")" "${ocargs[@]}" --from-file=htpasswd="$fn"
 }
 
 function delUser() {
     local user="${1%%:*}"
-    printf 'TODO: User deletion is not yet implementd!\n' >&2
+    local ocargs=( -n=openshift-config )
+    if [[ "${DRY_RUN:-0}" == 1 ]]; then
+        ocargs+=( --dry-run )
+    fi
+    readarray -t matches <<<"$(grep -l "^$user:" "${files[@]}" ||:)"
+    if [[ "${#matches[@]}" -ge 1 && ( "${#matches[@]}" != 1 || -n "${matches[0]:-}" ) ]]; then
+        for fn in "${matches[@]}"; do
+            printf 'Removing user "%s" from secret %s\n' "$user" "$(basename "$fn")"
+            htpasswd -D "$fn" "$user"
+            oc set data "secret/$(basename "$fn")" "${ocargs[@]}" --from-file=htpasswd="$fn"
+        done
+    else
+        printf 'User "%s" not present in any htpasswd file!\n' "$user"
+    fi
 }
 
 for user in "${users[@]}"; do
