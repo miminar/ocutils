@@ -5,7 +5,7 @@ IFS=$'\n\t'
 
 readonly USAGE="$(basename "${BASH_SOURCE[0]}") [-hn] user1[:password1][-] (user2[:password2][-])*
 
-Add a user to OCP's htpasswd authentication provider.
+Add or remove a user to/from OCP's htpasswd authentication provider.
 
 If htpasswd is not yet configured, new htpasswd secret file will be created and htpassswd
 authentication will be configured.
