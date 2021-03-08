@@ -162,6 +162,12 @@ export -f getSystemContainersAllocation
 function getAllocationForNode() {
     local node="$1"
     export MEASURE_PERIOD TMPDIR
+    local columnArgs=( --table --separator $'\t' )
+    if ( column --version | awk '{print $NF}'; printf '2.30\n'; ) | sort -V | head -n 1 | \
+            grep -q -F "2.30";
+    then
+        columnArgs+=( --table-right "3,4" )
+    fi
     local args=( --keep-order -P 4 --id "alloc-$node" )
     ( 
         parallel "${args[@]}" echo -e "Node\\\t$node\\\t\\\t"
@@ -169,7 +175,7 @@ function getAllocationForNode() {
         parallel "${args[@]}" getSystemContainersAllocation "$node" \
             "$MEASURE_PERIOD" '\\t'; \
         parallel "${args[@]}" --wait; \
-    ) | column --table --separator $'\t' --table-right 3,4
+    ) | column "${columnArgs[@]}"
 }
 export -f getAllocationForNode
 
