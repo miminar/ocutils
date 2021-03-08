@@ -166,6 +166,8 @@ function getAllocationForNode() {
     if ( column --version | awk '{print $NF}'; printf '2.30\n'; ) | sort -V | head -n 1 | \
             grep -q -F "2.30";
     then
+        # Align the last 2 columns to the right
+        # --table-right is supported by column since release 2.30
         columnArgs+=( --table-right "3,4" )
     fi
     local args=( --keep-order -P 4 --id "alloc-$node" )
@@ -183,12 +185,6 @@ if [[ "${#nodes[@]}" -lt 1 ]]; then
     printf 'No nodes given!\n' >&2
     exit 1
 fi
-
-## TODO: debug
-#for node in "${nodes[@]}"; do
-#    getSystemContainersAllocation  "$node"
-#done
-#exit 0
 
 export MEASURE_PERIOD TMPDIR
 if command -v parallel >/dev/null; then
