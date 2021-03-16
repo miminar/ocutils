@@ -3,20 +3,37 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# number of seconds to measure
-readonly MEASURE_PERIOD=10
+readonly USAGE="$(basename "${BASH_SOURCE[0]}") [Options] [node1 [node2 ...]]
 
-nodes=( )
-if [[ $# -gt 0 ]]; then
-    nodes+=( "$@" )
-fi
+Options:
+  -h | --help       Show this message and exit.
+  -l | --node-selector NODE_SELECTOR
+                    Node label selector to limit the script execution.
+  -m | --measure-period MEASURE_PERIOD
+                    The minimum Number of seconds to collect statistics.
+  -s | --skip SKIP_STATS
+                    A comma separated list of measurements to skip. Valid values are:
 
-if [[ -z "${node:-}" ]]; then
-    readarray -t nodes <<<"$(oc get nodes -o name | awk -F / '{print $2}')"
-fi
+                        systemd api
 
-TMPDIR="$(mktemp -d)"
-cat >"$TMPDIR/get-system-average.sh" <<-EOF
+                    Where:
+                        systemd - Collects statistics about systemd slices and scopes.
+                        api     - Gets statistics from k8s API via HTTP endpoint
+                                    /api/v1/nodes/\$nodeName/proxy/stats/summary
+                        zombies - Get the number of zombies.
+  -e | --exec STATS
+                    A comma separated list of measurements to perform. No other measurements will
+                    be performed. The list of allowed values is the same as for SKIP_STATS.
+  --lb | --line-buffer
+                    Useful for debugging. The outputs will be unsorted.
+"
+
+function _init() {
+    TMPDIR="$(mktemp -d)"
+    export TMPDIR
+
+    if grep -q -F 'systemd' <<<"${STATS}"; then
+        cat >"$TMPDIR/get-system-average.sh" <<-EOF
 	#!/usr/bin/env bash
 	systemd-cgtop --batch --raw --iterations=$MEASURE_PERIOD | awk '
 	BEGIN { skipcpu=1 }
@@ -47,11 +64,61 @@ cat >"$TMPDIR/get-system-average.sh" <<-EOF
 	    printf "Total\t%dm\t%dMi\n", totalavg["cpu"], totalavg["mem"]
 	}'
 	EOF
+    fi
+
+    if grep -q -F 'zombies' <<<"${STATS}"; then
+        cat >"$TMPDIR/get-zombies-average.sh" <<-EOF
+	#!/usr/bin/env bash
+    started="\$(date +%s)"
+	while true; do
+        ps -axu
+        printf '#\n'
+        now="\$(date +%s)"
+        if [[ "\$((\$now - \$started))" -gt "$MEASURE_PERIOD" ]]; then
+            break
+        fi
+        sleep 1
+    done | awk '
+	BEGIN { iteration=0; zombies[0] = 0 }
+    {
+        if (\$1 ~ /^#\$/) {
+            if (zombies[iteration] > zmbmax) {
+                zmbmax = zombies[iteration]
+            }
+            if (iteration == 0 || zmbmin > zombies[iteration]) {
+                zmbmin = zombies[iteration]
+            }
+            iteration += 1
+        } else if (\$8 ~ /Z/) {
+            zombies[iteration] += 1
+        }
+	}
+	END {
+        // reindexes the array - indexes are bumped by one
+        asort(zombies)
+        if (iteration % 2 == 0) {
+            zmbmean = (zombies[int((iteration/2))] + zombies[int((iteration/2) + 1)])/2
+        } else {
+            zmbmean = zombies[int(iteration/2) + 1]
+        }
+        zmbavg = 0
+        for (i=1; i <= iteration; i += 1) {
+            zmbavg += zombies[i]
+        }
+        zmbavg /= iteration
+
+        printf "Zombies Min\tMean\tAverage\tMax\tIterations\n"
+        printf "%d\t%s\t%s\t%d\t%d\n", zmbmin, zmbmean, zmbavg, zmbmax, iteration
+	}'
+	EOF
+    fi
+
+    trap cleanup EXIT
+}
 
 function cleanup() {
     rm -rf "$TMPDIR"
 }
-trap cleanup EXIT
 
 function getSystemAllocation() {
     local node="$1"
@@ -135,7 +202,7 @@ function getSystemContainersAllocation() {
 
             {
                 "cpu": . | mkStats("cpu"; "usageNanoCores"),
-                "memory": . | mkStats("memory"; "usageBytes"),
+                "memory": . | mkStats("memory"; "rssBytes"),
                 "finished": ($stats.finished // false)
             } as $newStats | $newStats | .finished |= ($minSecs <= ([
                     minMeasuredTime($newStats.cpu), minMeasuredTime($newStats.memory)] | min))')"
@@ -159,9 +226,19 @@ function getSystemContainersAllocation() {
 }
 export -f getSystemContainersAllocation
 
+function getZombies() {
+    local node="$1"
+    local minSecs="${2:-$MEASURE_PERIOD}"
+    local indent
+    indent="$(echo -e "${3:-}")"
+    scp "$TMPDIR/get-zombies-average.sh" "$node":~/get-zombies-average.sh
+    ssh "$node" sudo /bin/bash ./get-zombies-average.sh | sed 's/^/'"${indent:-}"'/'
+}
+export -f getZombies
+
 function getAllocationForNode() {
     local node="$1"
-    export MEASURE_PERIOD TMPDIR
+    export MEASURE_PERIOD
     local columnArgs=( --table --separator $'\t' )
     if ( column --version | awk '{print $NF}'; printf '2.30\n'; ) | sort -V | head -n 1 | \
             grep -q -F "2.30";
@@ -170,25 +247,145 @@ function getAllocationForNode() {
         # --table-right is supported by column since release 2.30
         columnArgs+=( --table-right "3,4" )
     fi
-    local args=( --keep-order -P 4 --id "alloc-$node" )
+    local args=( -P 5 --id "alloc-$node" )
+    if [[ $LINE_BUFFER == 1 ]]; then
+        args+=( --line-buffer )
+    else
+        args+=( --keep-order )
+    fi
     ( 
         parallel "${args[@]}" echo -e "Node\\\t$node\\\t\\\t"
-        parallel "${args[@]}" getSystemAllocation "$node" '\\t'; \
-        parallel "${args[@]}" getSystemContainersAllocation "$node" \
-            "$MEASURE_PERIOD" '\\t'; \
+        if grep -q -F 'systemd' <<<"${STATS}"; then
+            parallel "${args[@]}" getSystemAllocation "$node" '\\t'; fi;\
+        if grep -q -F 'api' <<<"${STATS}"; then
+            parallel "${args[@]}" getSystemContainersAllocation "$node" \
+                "$MEASURE_PERIOD" '\\t'; fi; \
+        if grep -q -F "zombies" <<<"${STATS}"; then
+            parallel "${args[@]}" getZombies "$node" \
+                "$MEASURE_PERIOD" '\\t'; fi; \
         parallel "${args[@]}" --wait; \
     ) | column "${columnArgs[@]}"
 }
 export -f getAllocationForNode
 
-if [[ "${#nodes[@]}" -lt 1 ]]; then
+readonly ALL_STATS=( systemd api zombies )
+collectStats=( systemd api zombies )
+LINE_BUFFER=0
+# number of seconds to measure
+MEASURE_PERIOD=10
+
+readonly longOptions=(
+    help node-selector: measure-period: skip: exec: line-buffer lb
+)
+
+function join() { local IFS="$1"; shift; echo "$*"; }
+
+TMPARGS="$(getopt -o hl:m:s:e: --long "$(join , "${longOptions[@]}")" \
+    -n "$(basename "${BASH_SOURCE[0]}")" -- "$@")"
+eval set -- "${TMPARGS:-}"
+
+while true; do
+    case "$1" in
+        -h | --help)
+            printf '%s' "$USAGE"
+            exit 0
+            ;;
+        -l | --node-selector)
+            NODE_SELECTOR="$2"
+            shift 2
+            ;;
+        -m | --measure-period)
+            MEASURE_PERIOD="$2"
+            shift 2
+            ;;
+        -s | --skip)
+            readarray -t skipStats <<<"$(tr -d '[:space:]' <<< "$2" | tr ',' '\n')"
+            shift 2
+            readarray -t unknownStats <<<"$(grep -v -F -f <(printf '%s\n' "${ALL_STATS[@]}") \
+                <<<"$(printf '%s\n' "${skipStats[@]}")")"
+            if [[ "${#unknownStats[@]}" -gt 1 || ( "${#unknownStats[@]}" == 1 && \
+                -n "${unknownStats[0]:-}" ) ]];
+            then
+                printf 'Cannot skip unknown stats: %s\n' >&2 "$(join , "${unknownStats[@]}")"
+                exit 1
+            fi
+
+            readarray -t newStats <<<"$(grep -v -F -f <(printf '%s\n' "${skipStats[@]}") \
+                    <<<"$(printf '%s\n' "${collectStats[@]:-}")")"
+            collectStats=( "${newStats[@]}" )
+            ;;
+
+        -e | --exec)
+            readarray -t execStats <<<"$(tr -d '[:space:]' <<< "$2" | tr ',' '\n')"
+            shift 2
+            readarray -t unknownStats <<<"$(grep -v -F -f <(printf '%s\n' "${ALL_STATS[@]}") \
+                <<<"$(printf '%s\n' "${execStats[@]}")")"
+            if [[ "${#unknownStats[@]}" -gt 1 || ( "${#unknownStats[@]}" == 1 && \
+                -n "${unknownStats[0]:-}" ) ]];
+            then
+                printf 'Cannot skip unknown stats: %s\n' >&2 "$(join , "${unknownStats[@]}")"
+                exit 1
+            fi
+
+            collectStats=( "${execStats[@]}" )
+            ;;
+
+        --lb | --line-buffer)
+            LINE_BUFFER=1
+            shift
+            ;;
+
+        --)
+            shift
+            break
+            ;;
+        *)
+            printf 'Unknown parameter "%s"!\n' >&2 "$1"
+            exit 1
+            ;;
+    esac
+done
+
+if [[ "${#collectStats[@]}" == 0 || ( "${#collectStats[@]}" == 1 && \
+        -z "${collectStats[0]:-}" ) ]]; then
+    printf 'No stats to collect.\n'
+    exit 0
+fi
+
+nodes=( )
+if [[ -n "${NODE_SELECTOR:-}" ]]; then
+    readarray -t nodes <<<"$(oc get nodes -l "${NODE_SELECTOR}" -o name | awk -F / '{print $2}')"
+fi
+
+if [[ $# -gt 0 ]]; then
+    nodes+=( "$@" )
+fi
+
+if [[ "${#nodes[@]}" == 0 || ( "${#nodes[@]}" == 1 && -z "${nodes[0]:-}" ) ]]; then
+    if [[ -n "${NODE_SELECTOR:-}" ]]; then
+        printf 'No nodes match the given node selector!\n' >&2
+        exit 1
+    fi
+    
+    readarray -t nodes <<<"$(oc get nodes -o name | awk -F / '{print $2}')"
+fi
+
+if [[ "${#nodes[@]}" == 0 || ( "${#nodes[@]}" == 1 && -z "${nodes[0]:-}" ) ]]; then
     printf 'No nodes given!\n' >&2
     exit 1
 fi
 
-export MEASURE_PERIOD TMPDIR
+STATS="$(join , "${collectStats[@]}")"
+export STATS
+_init
+export MEASURE_PERIOD LINE_BUFFER
+
 if command -v parallel >/dev/null; then
-    parallel --keep-order getAllocationForNode ::: "${nodes[@]}"
+    args=( --keep-order )
+    if [[ $LINE_BUFFER == 1 ]]; then
+        args=( --line-buffer )
+    fi
+    parallel "${args[@]}" getAllocationForNode ::: "${nodes[@]}"
     exit 0
 fi
 
