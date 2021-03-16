@@ -107,8 +107,8 @@ function _init() {
         }
         zmbavg /= iteration
 
-        printf "Zombies Min\tMean\tAverage\tMax\tIterations\n"
-        printf "%d\t%s\t%s\t%d\t%d\n", zmbmin, zmbmean, zmbavg, zmbmax, iteration
+        printf "Zombies: %d\t(Min=%d, Mean=%s,\tAvg=%s, Max=%d,\tIterations=%d)\n", \
+            zombies[iteration], zmbmin, zmbmean, zmbavg, zmbmax, iteration
 	}'
 	EOF
     fi
@@ -159,7 +159,8 @@ function getSystemContainersAllocation() {
         nodeStats="$(oc get --raw "/api/v1/nodes/$node/proxy/stats/summary" | \
             jq '.node.systemContainers')"
         stats="$(jq --argjson stats "$stats" --argjson minSecs "$minSecs" <<<"$nodeStats" '
-            def mkStats($res; $attr): [.[] | .[$res] as $new | $stats[$res][.name] as $prev | {
+            def mkStats($res; $sumRes; $attr): [.[] | .[$sumRes] as $new |
+                    $stats[$res][.name] as $prev | {
                 "key": .name,
                 "value": (
                     ($prev.initialUsage // $new[$attr]) as $initialUsage |
@@ -201,11 +202,12 @@ function getSystemContainersAllocation() {
                 $comp.ended - $comp.started] | min;
 
             {
-                "cpu": . | mkStats("cpu"; "usageNanoCores"),
-                "memory": . | mkStats("memory"; "rssBytes"),
+                "cpu":   . | mkStats("cpu";   "cpu";    "usageNanoCores"),
+                "rss":   . | mkStats("rss";   "memory"; "rssBytes"),
+                "usage": . | mkStats("usage"; "memory"; "usageBytes"),
                 "finished": ($stats.finished // false)
             } as $newStats | $newStats | .finished |= ($minSecs <= ([
-                    minMeasuredTime($newStats.cpu), minMeasuredTime($newStats.memory)] | min))')"
+                    minMeasuredTime($newStats.cpu), minMeasuredTime($newStats.rss)] | min))')"
         #now="$(date +%s)"
         if [[ "$(jq '.finished' <<<"$stats")" == true ]]; then
             break
@@ -214,13 +216,19 @@ function getSystemContainersAllocation() {
     done
     #printf '%s\n' "$stats"
     jq -r <<<"$stats" --arg indent "${indent:-}" '. as $stats | [
-        "\($indent)K8s API Node Stats System Component\tCores (avg)\tMemory (avg)"
+        ["\($indent)K8s API Node Stats System Component",
+         "Cores (avg)",
+         "Memory RSS (avg)",
+         "Memory Usage (avg)"] | join("\t")
     ] + ([$stats.cpu | keys[] |
         "\($indent)  \(.)\t\($stats.cpu[.].usage    / 1000000    | round)m\t\(
-                 $stats.memory[.].usage / (1024*1024)|round)Mi"]) + ([
+                 $stats.rss[.].usage / (1024*1024)|round)Mi\t\(
+                 $stats.usage[.].usage / (1024*1024)|round)Mi"]) + ([
         "\($indent)Total\t\([$stats.cpu    | keys[] | $stats.cpu[.].usage] |
                 reduce .[] as $u (0; .+$u) | . / 1000000 | round)m\t\(
-          [$stats.memory | keys[] | $stats.memory[.].usage] |
+          [$stats.rss | keys[] | $stats.rss[.].usage] |
+                reduce .[] as $u (0; .+$u) | . / 1000000 | round)Mi\t\(
+          [$stats.usage | keys[] | $stats.usage[.].usage] |
                 reduce .[] as $u (0; .+$u) | . / 1000000 | round)Mi"
     ]) | join("\n")'
 }
@@ -243,9 +251,9 @@ function getAllocationForNode() {
     if ( column --version | awk '{print $NF}'; printf '2.30\n'; ) | sort -V | head -n 1 | \
             grep -q -F "2.30";
     then
-        # Align the last 2 columns to the right
+        # Align the last 3 columns to the right
         # --table-right is supported by column since release 2.30
-        columnArgs+=( --table-right "3,4" )
+        columnArgs+=( --table-right "3,4,5" )
     fi
     local args=( -P 5 --id "alloc-$node" )
     if [[ $LINE_BUFFER == 1 ]]; then
@@ -254,17 +262,17 @@ function getAllocationForNode() {
         args+=( --keep-order )
     fi
     ( 
-        parallel "${args[@]}" echo -e "Node\\\t$node\\\t\\\t"
+        parallel "${args[@]}" echo -e "01#Node\\\t$node\\\t\\\t"
         if grep -q -F 'systemd' <<<"${STATS}"; then
-            parallel "${args[@]}" getSystemAllocation "$node" '\\t'; fi;\
+            parallel "${args[@]}" getSystemAllocation "$node" '02#\\t'; fi;\
         if grep -q -F 'api' <<<"${STATS}"; then
             parallel "${args[@]}" getSystemContainersAllocation "$node" \
-                "$MEASURE_PERIOD" '\\t'; fi; \
+                "$MEASURE_PERIOD" '03#\\t'; fi; \
         if grep -q -F "zombies" <<<"${STATS}"; then
             parallel "${args[@]}" getZombies "$node" \
-                "$MEASURE_PERIOD" '\\t'; fi; \
+                "$MEASURE_PERIOD" '04#\\t'; fi; \
         parallel "${args[@]}" --wait; \
-    ) | column "${columnArgs[@]}"
+    ) | sort -t '#' -s -k 1 -n | sed 's/^[[:digit:]]\+#//' | column "${columnArgs[@]}"
 }
 export -f getAllocationForNode
 
