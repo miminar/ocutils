@@ -22,20 +22,27 @@ Options:
   -n | --dry-run    Make no server-side changes.
   -r | --remove     Remove the given users from all configured htpasswd secret files instead of
                     adding them. The effet is the same as suffixing all the users with '-'.
+  -l | --list       List the user names recorded in all the htpasswd configs and exit.
 "
 
 longOptions=(
-    help dry-run remove
+    help dry-run remove list
 )
 
 function join() {
     IFS="$1"; shift; echo "$*"
 }
 
-TMPARGS="$(getopt -o hnr --long "$(join , "${longOptions[@]}")" \
+
+function listUsers() {
+    awk -F : '{if ($1 in arr) {next} else {arr[$1]=1; print $1}}' "${files[@]}"
+}
+
+TMPARGS="$(getopt -o hnrl --long "$(join , "${longOptions[@]}")" \
     -n "$(basename "${BASH_SOURCE[0]}")" -- "$@")"
 DRY_RUN=0
 REMOVE=0
+LIST=0
 eval set -- "${TMPARGS}"
 
 while true; do
@@ -52,6 +59,10 @@ while true; do
             REMOVE=1
             shift
             ;;
+        -l | --list)
+            LIST=1
+            shift
+            ;;
         --)
             shift
             break
@@ -63,8 +74,15 @@ while true; do
     esac
 done
 
+case "${LIST:-0}${REMOVE:-0}" in
+    11)
+        printf 'Listing and removing are mutually exclusive operations!\n' >&2
+        exit 1
+        ;;
+esac
+
 users=( "$@" )
-if [[ "${#users[@]}" -lt 0 ]]; then
+if [[ "${LIST:-0}" == 0 && "${#users[@]}" -lt 0 ]]; then
     printf 'Missing user!\n' >&2
     exit 1
 fi
@@ -95,6 +113,11 @@ else
         oc get -o json -n openshift-config "secret/$secret" | \
             jq -r '.data.htpasswd | @base64d' | grep -v '^\s*$' >"$fn"
     done
+fi
+
+if [[ "${LIST:-0}" == 1 ]]; then
+    listUsers
+    exit 0
 fi
 
 function addUser() {
