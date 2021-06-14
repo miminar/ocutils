@@ -88,7 +88,7 @@ if [[ "${LIST:-0}" == 0 && "${#users[@]}" -lt 0 ]]; then
 fi
 
 readarray -t secrets <<<"$(oc get oauths.config.openshift.io/cluster -o json | \
-    jq -r '.spec.identityProviders[] | select(.type == "HTPasswd") |
+    jq -r '(.spec.identityProviders // [])[] | select(.type == "HTPasswd") |
         .htpasswd.fileData.name')"
 
 TMPDIR="$(mktemp -d)"
